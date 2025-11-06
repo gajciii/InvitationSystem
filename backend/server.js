@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import todoRoutes from "./routes/todoRoutes.js";
 import authRoutes from "./routes/authRoutes.js";
+import invitationRoutes from "./routes/invitationRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -28,6 +29,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/auth", authRoutes);
+app.use("/api/invitations", invitationRoutes);
 app.use("/api/todos", todoRoutes || ((req,res)=>res.sendStatus(501)));
 
 const PORT = process.env.PORT || 5050;
