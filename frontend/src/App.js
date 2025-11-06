@@ -179,8 +179,6 @@ function App() {
           <div style={{ maxWidth: 960, margin: '0 auto', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
               <span style={{ fontWeight: 800 }}>Invitation Studio</span>
-              <a href="#create" style={{ textDecoration: 'none', color: '#2563eb' }}>Create</a>
-              <a href="#my" style={{ textDecoration: 'none', color: '#2563eb' }}>My Invitations</a>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ fontSize: 13, color: '#777' }}>{currentUser.email}</span>
