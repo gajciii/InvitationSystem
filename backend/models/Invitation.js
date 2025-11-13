@@ -4,6 +4,15 @@ const ResponseSchema = new mongoose.Schema({
   status: { type: String, enum: ["attending", "not_attending", "maybe"], required: true },
   notes: { type: String },
   createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  displayName: { type: String },
+  anonToken: { type: String },
+});
+
+ResponseSchema.pre("save", function (next) {
+  this.updatedAt = new Date();
+  next();
 });
 
 const InvitationSchema = new mongoose.Schema(
@@ -14,6 +23,7 @@ const InvitationSchema = new mongoose.Schema(
     location: { type: String },
     rsvpLink: { type: String },
     owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    responseCutoff: { type: Date },
     responses: [ResponseSchema],
   },
   { timestamps: true }

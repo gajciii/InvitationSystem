@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 
 const AUTH_URL = 'http://localhost:5050/api/auth';
 const INV_URL = 'http://localhost:5050/api/invitations';
+const RESPONSE_TOKEN_PREFIX = 'invitation-response-';
 
 function useQuery() {
   const [query] = useState(() => new URLSearchParams(window.location.search));
@@ -11,6 +12,89 @@ function useQuery() {
 function getShareUrl(id) {
   return `${window.location.origin}/?invitation=${id}`;
 }
+
+const combineDateAndTime = (dateValue, timeValue) => {
+  if (!dateValue && !timeValue) return null;
+  if (!dateValue) return null;
+  if (!timeValue) return new Date(dateValue);
+  return new Date(`${dateValue}T${timeValue}`);
+};
+
+const toDateInputValue = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const toTimeInputValue = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+};
+
+const formatDateTime = (value) => {
+  if (!value) return 'Ni datuma';
+  return new Date(value).toLocaleString();
+};
+
+const prettyStatus = (status) => {
+  if (!status) return '';
+  switch (status) {
+    case 'attending':
+      return 'Coming';
+    case 'not_attending':
+      return 'Not coming';
+    case 'maybe':
+      return 'Maybe';
+    default:
+      return status;
+  }
+};
+
+const statusBadgeColor = (status) => {
+  switch (status) {
+    case 'attending':
+      return '#22c55e';
+    case 'maybe':
+      return '#f97316';
+    case 'not_attending':
+      return '#ef4444';
+    default:
+      return '#64748b';
+  }
+};
+
+const responseTokenKey = (invitationId) => `${RESPONSE_TOKEN_PREFIX}${invitationId}`;
+
+const readStoredResponseToken = (invitationId) => {
+  if (!invitationId || typeof window === 'undefined') return '';
+  try {
+    return localStorage.getItem(responseTokenKey(invitationId)) || '';
+  } catch {
+    return '';
+  }
+};
+
+const persistResponseToken = (invitationId, tokenValue) => {
+  if (!invitationId || typeof window === 'undefined') return;
+  const key = responseTokenKey(invitationId);
+  try {
+    if (!tokenValue) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, tokenValue);
+    }
+  } catch {
+    // ignore storage failures
+  }
+};
 
 function App() {
   const query = useQuery();
@@ -32,17 +116,36 @@ function App() {
   const [time, setTime] = useState('');
   const [location, setLocation] = useState('');
   const [rsvpLink, setRsvpLink] = useState('');
+  const [cutoffDate, setCutoffDate] = useState('');
+  const [cutoffTime, setCutoffTime] = useState('');
   const [createdInvitationId, setCreatedInvitationId] = useState('');
 
   // Public invitation view
   const [publicInvitation, setPublicInvitation] = useState(null);
+  const [publicCanEdit, setPublicCanEdit] = useState(true);
+  const [myResponse, setMyResponse] = useState(null);
+  const [responseToken, setResponseToken] = useState(() => readStoredResponseToken(invitationIdFromUrl));
   const [rsvpStatus, setRsvpStatus] = useState('attending');
   const [rsvpNotes, setRsvpNotes] = useState('');
-  const [rsvpDone, setRsvpDone] = useState(false);
+  const [rsvpSaved, setRsvpSaved] = useState('');
+  const [savingRsvp, setSavingRsvp] = useState(false);
 
   // Owner dashboard
   const [myInvitations, setMyInvitations] = useState([]);
   const [managedInvitation, setManagedInvitation] = useState(null);
+  const [ownerPanel, setOwnerPanel] = useState('create'); // create | edit | responses
+
+  // Edit invitation form
+  const [editTitle, setEditTitle] = useState('');
+  const [editMessage, setEditMessage] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [editTime, setEditTime] = useState('');
+  const [editLocation, setEditLocation] = useState('');
+  const [editRsvpLink, setEditRsvpLink] = useState('');
+  const [editCutoffDate, setEditCutoffDate] = useState('');
+  const [editCutoffTime, setEditCutoffTime] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editSuccess, setEditSuccess] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -77,20 +180,44 @@ function App() {
     // eslint-disable-next-line
   }, [token]);
 
+  // Update stored response token when invitation query changes
+  React.useEffect(() => {
+    if (!invitationIdFromUrl) {
+      setResponseToken('');
+      return;
+    }
+    setResponseToken(readStoredResponseToken(invitationIdFromUrl));
+  }, [invitationIdFromUrl]);
+
   // Load public invitation if query has id
   React.useEffect(() => {
     const loadInvitation = async () => {
-      if (!invitationIdFromUrl) return;
+      if (!invitationIdFromUrl) {
+        setPublicInvitation(null);
+        return;
+      }
       try {
-        const res = await fetch(`${INV_URL}/${invitationIdFromUrl}`);
+        const headers = {};
+        if (responseToken) headers['X-Response-Token'] = responseToken;
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`${INV_URL}/${invitationIdFromUrl}`, { headers });
         const data = await res.json();
-        if (res.ok) setPublicInvitation(data);
-      } catch {}
+        if (res.ok) {
+          setPublicInvitation(data);
+          setPublicCanEdit(data.canEditResponse !== false);
+          setMyResponse(data.myResponse);
+          setRsvpStatus(data.myResponse?.status || 'attending');
+          setRsvpNotes(data.myResponse?.notes || '');
+          setRsvpSaved('');
+        }
+      } catch {
+        setPublicInvitation(null);
+      }
     };
     loadInvitation();
-  }, [invitationIdFromUrl]);
+  }, [invitationIdFromUrl, responseToken, token]);
 
-  // After login, load my invitations and auto-select newest
+  // After login, load my invitations and keep current selection if possible
   React.useEffect(() => {
     const loadMine = async () => {
       if (!currentUser || !token) return;
@@ -99,43 +226,288 @@ function App() {
         const data = await res.json();
         if (res.ok) {
           setMyInvitations(data);
-          setManagedInvitation(data[0] || null);
+          setManagedInvitation((prev) => {
+            if (!prev) return data[0] || null;
+            const stillExists = data.find((item) => item._id === prev._id);
+            return stillExists || data[0] || null;
+          });
         }
       } catch {}
     };
     loadMine();
   }, [currentUser, token]);
 
+  // Hydrate edit form when selection changes
+  React.useEffect(() => {
+    if (!managedInvitation) {
+      setEditTitle('');
+      setEditMessage('');
+      setEditDate('');
+      setEditTime('');
+      setEditLocation('');
+      setEditRsvpLink('');
+      setEditCutoffDate('');
+      setEditCutoffTime('');
+      setEditSuccess('');
+      return;
+    }
+    setEditTitle(managedInvitation.title || '');
+    setEditMessage(managedInvitation.message || '');
+    setEditDate(toDateInputValue(managedInvitation.dateTime));
+    setEditTime(toTimeInputValue(managedInvitation.dateTime));
+    setEditLocation(managedInvitation.location || '');
+    setEditRsvpLink(managedInvitation.rsvpLink || '');
+    setEditCutoffDate(toDateInputValue(managedInvitation.responseCutoff));
+    setEditCutoffTime(toTimeInputValue(managedInvitation.responseCutoff));
+    setEditSuccess('');
+  }, [managedInvitation]);
+
   const createInvitation = async () => {
     setError('');
+    const eventDateTime = combineDateAndTime(date, time);
+    const cutoffDateTime = combineDateAndTime(cutoffDate, cutoffTime);
     try {
-      const isoDateTime = date && time ? new Date(`${date}T${time}`) : (date ? new Date(date) : null);
       const res = await fetch(INV_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ title, message, dateTime: isoDateTime, location, rsvpLink })
+        body: JSON.stringify({
+          title,
+          message,
+          dateTime: eventDateTime ? eventDateTime.toISOString() : null,
+          location,
+          rsvpLink,
+          responseCutoff: cutoffDateTime ? cutoffDateTime.toISOString() : null
+        })
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Failed to create'); return; }
       setCreatedInvitationId(data._id);
-      // Prepend to list and select it
       setMyInvitations(prev => [data, ...prev]);
       setManagedInvitation(data);
-      // Reset editor
-      setTitle(''); setMessage(''); setDate(''); setTime(''); setLocation(''); setRsvpLink('');
+      setOwnerPanel('responses');
+      setTitle(''); setMessage(''); setDate(''); setTime(''); setLocation(''); setRsvpLink(''); setCutoffDate(''); setCutoffTime('');
     } catch { setError('Network error'); }
+  };
+
+  const updateInvitation = async () => {
+    if (!managedInvitation) return;
+    setError('');
+    setEditSuccess('');
+    setEditSaving(true);
+    const eventDateTime = combineDateAndTime(editDate, editTime);
+    const cutoffDateTime = combineDateAndTime(editCutoffDate, editCutoffTime);
+    try {
+      const res = await fetch(`${INV_URL}/${managedInvitation._id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          title: editTitle,
+          message: editMessage,
+          dateTime: eventDateTime ? eventDateTime.toISOString() : null,
+          location: editLocation,
+          rsvpLink: editRsvpLink,
+          responseCutoff: cutoffDateTime ? cutoffDateTime.toISOString() : null
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Failed to update invitation'); return; }
+      setManagedInvitation(data);
+      setMyInvitations(prev => prev.map(inv => inv._id === data._id ? data : inv));
+      setEditSuccess('Changes saved');
+    } catch {
+      setError('Network error');
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   const submitRsvp = async () => {
     if (!publicInvitation) return;
+    if (!publicCanEdit) { setError('RSVP window is closed'); return; }
     setError('');
+    setSavingRsvp(true);
+    setRsvpSaved('');
     try {
-      const res = await fetch(`${INV_URL}/${publicInvitation._id}/rsvp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: rsvpStatus, notes: rsvpNotes }) });
+      const headers = { 'Content-Type': 'application/json' };
+      if (responseToken) headers['X-Response-Token'] = responseToken;
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${INV_URL}/${publicInvitation._id}/rsvp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ status: rsvpStatus, notes: rsvpNotes })
+      });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Failed to submit RSVP'); return; }
-      setRsvpDone(true);
-    } catch { setError('Network error'); }
+      if (typeof data.responseToken !== 'undefined') {
+        persistResponseToken(publicInvitation._id, data.responseToken);
+        setResponseToken(data.responseToken || '');
+      }
+      setMyResponse({ _id: data.responseId, status: rsvpStatus, notes: rsvpNotes, updatedAt: data.updatedAt });
+      setRsvpSaved(data.mode === 'updated' ? 'Response updated' : 'Response submitted');
+    } catch {
+      setError('Network error');
+    } finally {
+      setSavingRsvp(false);
+    }
   };
+
+  const ownerResponseCounts = React.useMemo(() => {
+    const counts = { attending: 0, maybe: 0, not_attending: 0 };
+    (managedInvitation?.responses || []).forEach((resp) => {
+      counts[resp.status] = (counts[resp.status] || 0) + 1;
+    });
+    return counts;
+  }, [managedInvitation]);
+
+  const renderOwnerTabNav = () => (
+    <div style={{ display: 'flex', borderBottom: '1px solid #eee' }}>
+      {[
+        { id: 'create', label: 'Nova' },
+        { id: 'edit', label: 'Uredi' },
+        { id: 'responses', label: 'Odgovori' }
+      ].map(tab => {
+        const disabled = (tab.id !== 'create') && !managedInvitation;
+        return (
+          <button
+            key={tab.id}
+            onClick={() => !disabled && setOwnerPanel(tab.id)}
+            disabled={disabled}
+            style={{
+              flex: 1,
+              padding: '10px 0',
+              border: 'none',
+              borderBottom: ownerPanel === tab.id ? '3px solid #2563eb' : '3px solid transparent',
+              background: 'none',
+              fontWeight: ownerPanel === tab.id ? 700 : 500,
+              color: disabled ? '#bbb' : '#111',
+              cursor: disabled ? 'default' : 'pointer'
+            }}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  const renderCreatePanel = () => (
+    <div style={{ padding: 16 }}>
+      <div style={{ fontWeight: 700, marginBottom: 10 }}>Create Invitation</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10, maxWidth: 520 }}>
+        <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Title" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        <textarea value={message} onChange={e => setMessage(e.target.value)} placeholder="Message" rows={4} style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+          <input type="time" value={time} onChange={e => setTime(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input type="date" value={cutoffDate} onChange={e => setCutoffDate(e.target.value)} placeholder="RSVP cutoff date" style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+          <input type="time" value={cutoffTime} onChange={e => setCutoffTime(e.target.value)} placeholder="RSVP cutoff time" style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        </div>
+        <input value={location} onChange={e => setLocation(e.target.value)} placeholder="Location" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        <input value={rsvpLink} onChange={e => setRsvpLink(e.target.value)} placeholder="RSVP Link (optional)" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+        <button onClick={createInvitation} style={{ padding: '10px 14px', borderRadius: 8, border: 0, color: '#fff', background: '#16a34a' }}>Publish Invitation</button>
+        {createdInvitationId && (
+          <div style={{ fontSize: 12 }}>
+            Share: <a href={getShareUrl(createdInvitationId)}>{getShareUrl(createdInvitationId)}</a>
+            <button onClick={() => navigator.clipboard.writeText(getShareUrl(createdInvitationId))} style={{ marginLeft: 8, padding: '2px 6px', fontSize: 12 }}>Copy</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderEditPanel = () => (
+    <div style={{ padding: 16 }}>
+      {!managedInvitation && <div style={{ color: '#888' }}>Select an invitation to edit</div>}
+      {managedInvitation && (
+        <>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>Edit Invitation</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10, maxWidth: 520 }}>
+            <input value={editTitle} onChange={e => setEditTitle(e.target.value)} placeholder="Title" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            <textarea value={editMessage} onChange={e => setEditMessage(e.target.value)} placeholder="Message" rows={4} style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+              <input type="time" value={editTime} onChange={e => setEditTime(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input type="date" value={editCutoffDate} onChange={e => setEditCutoffDate(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+              <input type="time" value={editCutoffTime} onChange={e => setEditCutoffTime(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            </div>
+            <input value={editLocation} onChange={e => setEditLocation(e.target.value)} placeholder="Location" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            <input value={editRsvpLink} onChange={e => setEditRsvpLink(e.target.value)} placeholder="RSVP Link (optional)" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
+            <button onClick={updateInvitation} disabled={editSaving} style={{ padding: '10px 14px', borderRadius: 8, border: 0, color: '#fff', background: editSaving ? '#93c5fd' : '#2563eb' }}>
+              {editSaving ? 'Saving...' : 'Save changes'}
+            </button>
+            {editSuccess && <div style={{ color: '#22c55e' }}>{editSuccess}</div>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  const renderResponsesPanel = () => (
+    <div style={{ padding: 16 }}>
+      {!managedInvitation && <div style={{ color: '#888' }}>Select an invitation to view Odgovori</div>}
+      {managedInvitation && (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+            <div>
+              <div style={{ fontWeight: 700 }}>{managedInvitation.title}</div>
+              <div style={{ fontSize: 12, color: '#666' }}>{formatDateTime(managedInvitation.dateTime)}</div>
+            </div>
+            <div style={{ fontSize: 12, color: '#666' }}>{managedInvitation.responses?.length || 0} responses total</div>
+          </div>
+          <div style={{ marginTop: 10, fontSize: 12 }}>
+            Share: <a href={getShareUrl(managedInvitation._id)}>{getShareUrl(managedInvitation._id)}</a>
+            <button onClick={() => navigator.clipboard.writeText(getShareUrl(managedInvitation._id))} style={{ marginLeft: 8, padding: '2px 6px', fontSize: 12 }}>Copy</button>
+          </div>
+          {managedInvitation.responseCutoff && (
+            <div style={{ marginTop: 8, fontSize: 13, color: '#2563eb' }}>
+              RSVP cutoff: {new Date(managedInvitation.responseCutoff).toLocaleString()}
+            </div>
+          )}
+          <div style={{ marginTop: 16, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <div style={{ background: '#f0fdf4', borderRadius: 10, padding: '10px 14px' }}>
+              <div style={{ fontSize: 12, color: '#15803d' }}>Coming</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{ownerResponseCounts.attending}</div>
+            </div>
+            <div style={{ background: '#fffbeb', borderRadius: 10, padding: '10px 14px' }}>
+              <div style={{ fontSize: 12, color: '#c2410c' }}>Maybe</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{ownerResponseCounts.maybe}</div>
+            </div>
+            <div style={{ background: '#fef2f2', borderRadius: 10, padding: '10px 14px' }}>
+              <div style={{ fontSize: 12, color: '#b91c1c' }}>Not coming</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>{ownerResponseCounts.not_attending}</div>
+            </div>
+          </div>
+          {(managedInvitation.responses || []).length === 0 && <div style={{ color: '#888', marginTop: 16 }}>No responses yet</div>}
+          {(managedInvitation.responses || []).length > 0 && (
+            <div style={{ marginTop: 20 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.9fr 1.2fr 0.8fr', gap: 12, fontSize: 12, color: '#666', paddingBottom: 6, borderBottom: '1px solid #eee' }}>
+                <div>Name</div>
+                <div>Status</div>
+                <div>Notes</div>
+                <div>Updated</div>
+              </div>
+              {(managedInvitation.responses || []).map((r, idx) => (
+                <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.9fr 1.2fr 0.8fr', gap: 12, padding: '10px 0', borderBottom: '1px solid #f0f0f0', alignItems: 'center' }}>
+                  <div style={{ fontWeight: 500 }}>{r.name || 'Anonimno'}</div>
+                  <div>
+                    <span style={{ padding: '4px 8px', borderRadius: 999, fontSize: 12, background: statusBadgeColor(r.status) + '22', color: statusBadgeColor(r.status) }}>
+                      {prettyStatus(r.status)}
+                    </span>
+                  </div>
+                  <div>{r.notes || '-'}</div>
+                  <div style={{ fontSize: 12, color: '#999' }}>{r.updatedAt ? new Date(r.updatedAt).toLocaleString() : '-'}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
 
   // Public invitation page
   if (invitationIdFromUrl && publicInvitation) {
@@ -147,23 +519,39 @@ function App() {
             <a href="/" style={{ textDecoration: 'none' }}>Create your own</a>
           </div>
         </div>
-        <div style={{ maxWidth: 480, margin: '3rem auto', padding: 24, border: '1px solid #e6e6e6', borderRadius: 12, textAlign: 'center', boxShadow: '0 6px 18px rgba(0,0,0,0.06)' }}>
+        <div style={{ maxWidth: 520, margin: '3rem auto', padding: 24, border: '1px solid #e6e6e6', borderRadius: 12, textAlign: 'center', boxShadow: '0 6px 18px rgba(0,0,0,0.06)' }}>
           <h2 style={{ margin: 0 }}>{publicInvitation.title}</h2>
           {publicInvitation.dateTime && (<div style={{ fontSize: 13, color: '#666', marginTop: 6 }}>{new Date(publicInvitation.dateTime).toLocaleString()}</div>)}
           {publicInvitation.location && (<div style={{ fontSize: 13, color: '#666', marginTop: 2 }}>{publicInvitation.location}</div>)}
           {publicInvitation.message && (<p style={{ marginTop: 14 }}>{publicInvitation.message}</p>)}
-          {!rsvpDone ? (
-            <div style={{ marginTop: 16, textAlign: 'left' }}>
-              <div style={{ marginBottom: 6, fontWeight: 600 }}>Odgovori</div>
-              <select value={rsvpStatus} onChange={e => setRsvpStatus(e.target.value)} style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #ddd' }}>
-                <option value="attending">Attending</option>
-                <option value="maybe">Maybe</option>
-                <option value="not_attending">Not attending</option>
-              </select>
-              <textarea value={rsvpNotes} onChange={e => setRsvpNotes(e.target.value)} placeholder="Additional notes" style={{ width: '100%', padding: 10, marginTop: 8, borderRadius: 8, border: '1px solid #ddd' }} />
-              <button onClick={submitRsvp} style={{ marginTop: 10, padding: '10px 16px', background: '#2563eb', color: '#fff', border: 0, borderRadius: 8 }}>Submit RSVP</button>
+          {publicInvitation.responseCutoff && (
+            <div style={{ marginTop: 12, fontSize: 12, color: publicCanEdit ? '#2563eb' : '#b91c1c' }}>
+              RSVP cutoff: {new Date(publicInvitation.responseCutoff).toLocaleString()}
             </div>
-          ) : (<div style={{ marginTop: 16, color: 'green' }}>RSVP submitted. Thank you!</div>)}
+          )}
+          <div style={{ marginTop: 16, textAlign: 'left' }}>
+            <div style={{ marginBottom: 6, fontWeight: 600 }}>Odgovori</div>
+            {!publicCanEdit && (
+              <div style={{ color: '#b91c1c', fontSize: 13, marginBottom: 8 }}>
+                RSVP changes are closed for this invitation.
+              </div>
+            )}
+            <select value={rsvpStatus} onChange={e => setRsvpStatus(e.target.value)} disabled={!publicCanEdit} style={{ width: '100%', padding: 10, borderRadius: 8, border: '1px solid #ddd' }}>
+              <option value="attending">Attending</option>
+              <option value="maybe">Maybe</option>
+              <option value="not_attending">Not attending</option>
+            </select>
+            <textarea value={rsvpNotes} onChange={e => setRsvpNotes(e.target.value)} disabled={!publicCanEdit} placeholder="Additional notes" style={{ width: '100%', padding: 10, marginTop: 8, borderRadius: 8, border: '1px solid #ddd', minHeight: 80 }} />
+            <button onClick={submitRsvp} disabled={!publicCanEdit || savingRsvp} style={{ marginTop: 10, padding: '10px 16px', background: publicCanEdit ? '#2563eb' : '#94a3b8', color: '#fff', border: 0, borderRadius: 8 }}>
+              {savingRsvp ? 'Saving...' : myResponse ? 'Update RSVP' : 'Submit RSVP'}
+            </button>
+            {rsvpSaved && <div style={{ color: '#16a34a', marginTop: 8 }}>{rsvpSaved}</div>}
+            {myResponse && (
+              <div style={{ marginTop: 10, fontSize: 12, color: '#666' }}>
+                Last updated: {myResponse.updatedAt ? new Date(myResponse.updatedAt).toLocaleString() : 'just now'}
+              </div>
+            )}
+          </div>
           {error && <div style={{ color: 'red', marginTop: 10 }}>{error}</div>}
         </div>
       </div>
@@ -189,7 +577,7 @@ function App() {
 
         <div style={{ maxWidth: 960, margin: '1.5rem auto', display: 'grid', gridTemplateColumns: '280px 1fr', gap: 20 }}>
           {/* Left: My Invitations */}
-          <div id="my" style={{ border: '1px solid #eee', borderRadius: 12, padding: 12 }}>
+          <div id="my" style={{ border: '1px solid #eee', borderRadius: 12, padding: 12, height: 'fit-content' }}>
             <div style={{ fontWeight: 700, marginBottom: 8 }}>My Invitations</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {myInvitations.map((inv) => (
@@ -198,6 +586,12 @@ function App() {
                     <div style={{ fontWeight: 600, fontSize: 14 }}>{inv.title}</div>
                     <div style={{ fontSize: 12, color: '#777' }}>{inv.dateTime ? new Date(inv.dateTime).toLocaleString() : 'No date'}</div>
                   </button>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 6 }}>
+                    <span>{inv.responses?.length || 0} responses</span>
+                    <button onClick={() => { setManagedInvitation(inv); setOwnerPanel('responses'); }} style={{ border: 'none', background: 'none', color: '#2563eb', cursor: 'pointer', padding: 0 }}>
+                      Odgovori
+                    </button>
+                  </div>
                   <div style={{ marginTop: 6, fontSize: 12 }}>
                     Link: <a href={getShareUrl(inv._id)}>{getShareUrl(inv._id)}</a>
                     <button onClick={() => navigator.clipboard.writeText(getShareUrl(inv._id))} style={{ marginLeft: 8, padding: '2px 6px', fontSize: 12 }}>Copy</button>
@@ -208,58 +602,15 @@ function App() {
             </div>
           </div>
 
-          {/* Right: Editor + Responses */}
-          <div>
-            <div id="create" style={{ border: '1px solid #eee', borderRadius: 12, padding: 16, marginBottom: 16 }}>
-              <div style={{ fontWeight: 700, marginBottom: 10 }}>Create Invitation</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10, maxWidth: 520 }}>
-                <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Title" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                <textarea value={message} onChange={e => setMessage(e.target.value)} placeholder="Message" rows={4} style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                  <input type="time" value={time} onChange={e => setTime(e.target.value)} style={{ flex: 1, padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                </div>
-                <input value={location} onChange={e => setLocation(e.target.value)} placeholder="Location" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                <input value={rsvpLink} onChange={e => setRsvpLink(e.target.value)} placeholder="RSVP Link (optional)" style={{ padding: 10, borderRadius: 8, border: '1px solid #ddd' }} />
-                <button onClick={createInvitation} style={{ padding: '10px 14px', borderRadius: 8, border: 0, color: '#fff', background: '#16a34a' }}>Publish Invitation</button>
-                {createdInvitationId && (
-                  <div style={{ fontSize: 12 }}>
-                    Share: <a href={getShareUrl(createdInvitationId)}>{getShareUrl(createdInvitationId)}</a>
-                    <button onClick={() => navigator.clipboard.writeText(getShareUrl(createdInvitationId))} style={{ marginLeft: 8, padding: '2px 6px', fontSize: 12 }}>Copy</button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div style={{ border: '1px solid #eee', borderRadius: 12, padding: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ fontWeight: 700 }}>Responses</div>
-                {managedInvitation && (
-                  <div style={{ fontSize: 12, color: '#666' }}>{managedInvitation.responses?.length || 0} total</div>
-                )}
-              </div>
-              {managedInvitation ? (
-                <div style={{ marginTop: 10 }}>
-                  <div style={{ marginBottom: 8, fontWeight: 600 }}>{managedInvitation.title}</div>
-                  <div style={{ marginBottom: 10, fontSize: 12 }}>
-                    Share: <a href={getShareUrl(managedInvitation._id)}>{getShareUrl(managedInvitation._id)}</a>
-                    <button onClick={() => navigator.clipboard.writeText(getShareUrl(managedInvitation._id))} style={{ marginLeft: 8, padding: '2px 6px', fontSize: 12 }}>Copy</button>
-                  </div>
-                  {(managedInvitation.responses || []).length === 0 && <div style={{ color: '#888' }}>No responses yet</div>}
-                  {(managedInvitation.responses || []).map((r, idx) => (
-                    <div key={idx} style={{ display: 'grid', gridTemplateColumns: '140px 1fr 160px', gap: 10, padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
-                      <div style={{ textTransform: 'capitalize' }}>{r.status.replace('_',' ')}</div>
-                      <div>{r.notes || '-'}</div>
-                      <div style={{ color: '#999', fontSize: 12 }}>{new Date(r.createdAt).toLocaleString()}</div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div style={{ color: '#888' }}>Select an invitation to view responses</div>
-              )}
-            </div>
+          {/* Right: Panels */}
+          <div style={{ border: '1px solid #eee', borderRadius: 12, background: '#fff' }}>
+            {renderOwnerTabNav()}
+            {ownerPanel === 'create' && renderCreatePanel()}
+            {ownerPanel === 'edit' && renderEditPanel()}
+            {ownerPanel === 'responses' && renderResponsesPanel()}
           </div>
         </div>
+        {error && <div style={{ textAlign: 'center', marginTop: 10, color: 'red' }}>{error}</div>}
       </div>
     );
   }
