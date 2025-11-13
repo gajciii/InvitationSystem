@@ -134,6 +134,8 @@ function App() {
   const [myInvitations, setMyInvitations] = useState([]);
   const [managedInvitation, setManagedInvitation] = useState(null);
   const [ownerPanel, setOwnerPanel] = useState('create'); // create | edit | responses
+  const [myResponses, setMyResponses] = useState([]);
+  const [myResponsesError, setMyResponsesError] = useState('');
 
   // Edit invitation form
   const [editTitle, setEditTitle] = useState('');
@@ -163,7 +165,54 @@ function App() {
     } catch { setError('Network error'); }
   };
 
-  const handleLogout = () => { setToken(''); setCurrentUser(null); localStorage.removeItem('token'); };
+  const handleLogout = () => {
+    setToken('');
+    setCurrentUser(null);
+    localStorage.removeItem('token');
+    setMyInvitations([]);
+    setManagedInvitation(null);
+    setOwnerPanel('create');
+    setMyResponses([]);
+    setMyResponsesError('');
+  };
+
+  const refreshMyResponses = React.useCallback(async () => {
+    if (!currentUser || !token) {
+      setMyResponses([]);
+      setMyResponsesError('');
+      return;
+    }
+    try {
+      const res = await fetch(`${INV_URL}/my/responses`, { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (!res.ok) {
+        setMyResponses([]);
+        setMyResponsesError(data.error || 'Failed to load responses');
+        return;
+      }
+      const mapped = (data || []).map((item) => ({
+        invitationId: item._id,
+        title: item.title,
+        dateTime: item.dateTime,
+        location: item.location,
+        responseCutoff: item.responseCutoff,
+        status: item.response?.status || 'attending',
+        notes: item.response?.notes || '',
+        updatedAt: item.response?.updatedAt || null,
+        canEdit: item.response?.canEdit !== false,
+        draftStatus: item.response?.status || 'attending',
+        draftNotes: item.response?.notes || '',
+        saving: false,
+        message: '',
+        responseError: '',
+      }));
+      setMyResponses(mapped);
+      setMyResponsesError('');
+    } catch {
+      setMyResponses([]);
+      setMyResponsesError('Failed to load responses');
+    }
+  }, [currentUser, token]);
 
   // Fetch user if token exists
   React.useEffect(() => {
@@ -236,6 +285,10 @@ function App() {
     };
     loadMine();
   }, [currentUser, token]);
+
+  React.useEffect(() => {
+    refreshMyResponses();
+  }, [refreshMyResponses]);
 
   // Hydrate edit form when selection changes
   React.useEffect(() => {
@@ -321,6 +374,63 @@ function App() {
     }
   };
 
+  const updateMyResponseDraft = (invitationId, field, value) => {
+    const key = field === 'status' ? 'draftStatus' : 'draftNotes';
+    setMyResponses((prev) =>
+      prev.map((item) =>
+        item.invitationId === invitationId
+          ? { ...item, [key]: value, message: '', responseError: '' }
+          : item
+      )
+    );
+  };
+
+  const saveMyResponse = async (invitationId) => {
+    if (!token) return;
+    const target = myResponses.find((item) => item.invitationId === invitationId);
+    if (!target || !target.canEdit || target.saving) return;
+    const payload = { status: target.draftStatus, notes: target.draftNotes };
+    setMyResponses((prev) =>
+      prev.map((item) =>
+        item.invitationId === invitationId ? { ...item, saving: true, responseError: '', message: '' } : item
+      )
+    );
+    try {
+      const res = await fetch(`${INV_URL}/${invitationId}/rsvp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to update response');
+      }
+      setMyResponses((prev) =>
+        prev.map((item) =>
+          item.invitationId === invitationId
+            ? {
+                ...item,
+                status: payload.status,
+                notes: payload.notes,
+                updatedAt: data.updatedAt || new Date().toISOString(),
+                saving: false,
+                message: data.mode === 'updated' ? 'Response updated' : 'Response saved',
+                responseError: ''
+              }
+            : item
+        )
+      );
+    } catch (err) {
+      setMyResponses((prev) =>
+        prev.map((item) =>
+          item.invitationId === invitationId
+            ? { ...item, saving: false, responseError: err.message || 'Failed to update response' }
+            : item
+        )
+      );
+    }
+  };
+
   const submitRsvp = async () => {
     if (!publicInvitation) return;
     if (!publicCanEdit) { setError('RSVP window is closed'); return; }
@@ -344,6 +454,9 @@ function App() {
       }
       setMyResponse({ _id: data.responseId, status: rsvpStatus, notes: rsvpNotes, updatedAt: data.updatedAt });
       setRsvpSaved(data.mode === 'updated' ? 'Response updated' : 'Response submitted');
+      if (token) {
+        refreshMyResponses();
+      }
     } catch {
       setError('Network error');
     } finally {
@@ -599,6 +712,77 @@ function App() {
                 </div>
               ))}
               {myInvitations.length === 0 && <div style={{ color: '#888' }}>No invitations yet</div>}
+            </div>
+            <div style={{ borderTop: '1px solid #f5f5f5', margin: '16px 0' }} />
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>My Responses</div>
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>Events you have responded to</div>
+            {myResponsesError && <div style={{ color: '#b91c1c', fontSize: 12, marginBottom: 8 }}>{myResponsesError}</div>}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {myResponses.map((resp) => {
+                const saveDisabled = !resp.canEdit || resp.saving || (resp.draftStatus === resp.status && resp.draftNotes === resp.notes);
+                return (
+                  <div key={resp.invitationId} style={{ border: '1px solid #f0f0f0', borderRadius: 10, padding: 10, background: '#fff' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 14 }}>{resp.title}</div>
+                        <div style={{ fontSize: 12, color: '#777' }}>{formatDateTime(resp.dateTime)}</div>
+                      </div>
+                      <div style={{ fontSize: 12, textAlign: 'right' }}>
+                        <div style={{ color: '#666' }}>Current</div>
+                        <span style={{ padding: '3px 8px', borderRadius: 999, background: statusBadgeColor(resp.status) + '22', color: statusBadgeColor(resp.status) }}>
+                          {prettyStatus(resp.status)}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                      <select
+                        value={resp.draftStatus}
+                        onChange={e => updateMyResponseDraft(resp.invitationId, 'status', e.target.value)}
+                        disabled={!resp.canEdit || resp.saving}
+                        style={{ flex: 0.85, padding: 10, borderRadius: 8, border: '1px solid #ddd' }}
+                      >
+                        <option value="attending">Attending</option>
+                        <option value="maybe">Maybe</option>
+                        <option value="not_attending">Not attending</option>
+                      </select>
+                      <button
+                        onClick={() => { window.location.href = getShareUrl(resp.invitationId); }}
+                        style={{ flex: 0.15, minWidth: 80, padding: '10px 8px', borderRadius: 8, border: '1px solid #ddd', background: '#fff', fontSize: 12 }}
+                      >
+                        Open
+                      </button>
+                    </div>
+                    <textarea
+                      value={resp.draftNotes}
+                      onChange={e => updateMyResponseDraft(resp.invitationId, 'notes', e.target.value)}
+                      disabled={!resp.canEdit || resp.saving}
+                      placeholder="Notes"
+                      style={{ width: '100%', padding: 10, marginTop: 8, borderRadius: 8, border: '1px solid #ddd', minHeight: 70 }}
+                    />
+                    <button
+                      onClick={() => saveMyResponse(resp.invitationId)}
+                      disabled={saveDisabled}
+                      style={{ marginTop: 8, width: '100%', padding: '8px 12px', borderRadius: 8, border: 0, color: '#fff', background: saveDisabled ? '#93c5fd' : '#2563eb' }}
+                    >
+                      {resp.saving ? 'Saving...' : 'Save response'}
+                    </button>
+                    {resp.responseCutoff && (
+                      <div style={{ marginTop: 6, fontSize: 11, color: resp.canEdit ? '#2563eb' : '#b91c1c' }}>
+                        RSVP cutoff: {new Date(resp.responseCutoff).toLocaleString()}
+                      </div>
+                    )}
+                    {!resp.canEdit && (
+                      <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 2 }}>Changes are closed for this event.</div>
+                    )}
+                    {resp.message && <div style={{ color: '#16a34a', fontSize: 12, marginTop: 6 }}>{resp.message}</div>}
+                    {resp.responseError && <div style={{ color: '#b91c1c', fontSize: 12, marginTop: 6 }}>{resp.responseError}</div>}
+                    {resp.updatedAt && (
+                      <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>Updated: {new Date(resp.updatedAt).toLocaleString()}</div>
+                    )}
+                  </div>
+                );
+              })}
+              {!myResponsesError && myResponses.length === 0 && <div style={{ color: '#888' }}>You have not responded yet</div>}
             </div>
           </div>
 

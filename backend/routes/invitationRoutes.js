@@ -161,6 +161,32 @@ router.put("/:id", auth, async (req, res) => {
   }
 });
 
+// List invitations I responded to (auth)
+router.get("/my/responses", auth, async (req, res) => {
+  try {
+    const invitations = await Invitation.find({ "responses.user": req.user.id }).sort({ updatedAt: -1 });
+    const payload = invitations
+      .map((invitation) => {
+        const viewerResponse = invitation.responses.find((resp) => resp.user && resp.user.toString() === req.user.id);
+        if (!viewerResponse) return null;
+        return {
+          ...sanitizePublicInvitation(invitation),
+          response: {
+            _id: viewerResponse._id,
+            status: viewerResponse.status,
+            notes: viewerResponse.notes,
+            updatedAt: viewerResponse.updatedAt || viewerResponse.createdAt,
+            canEdit: !responseClosed(invitation),
+          },
+        };
+      })
+      .filter(Boolean);
+    res.json(payload);
+  } catch {
+    res.status(500).json({ error: "Failed to load responses" });
+  }
+});
+
 // Get by id (public)
 router.get("/:id", optionalAuth, async (req, res) => {
   try {
