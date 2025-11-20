@@ -1,11 +1,17 @@
 import express from "express";
 import crypto from "crypto";
 import Invitation from "../models/Invitation.js";
+import PDFDocument from "pdfkit";
 import jwt from "jsonwebtoken";
 
 const router = express.Router();
 const jwtSecret = process.env.JWT_SECRET || "changeme";
 const RSVP_STATUSES = ["attending", "not_attending", "maybe"];
+const STATUS_LABELS = {
+  attending: "Attending",
+  not_attending: "Not attending",
+  maybe: "Maybe",
+};
 
 function auth(req, res, next) {
   const header = req.headers.authorization;
@@ -97,6 +103,11 @@ const responseClosed = (invitation) => {
   return Date.now() > new Date(invitation.responseCutoff).getTime();
 };
 
+const safeFileName = (value) => {
+  if (!value) return "invitation";
+  return value.toLowerCase().replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "") || "invitation";
+};
+
 // List my invitations (auth)
 router.get("/", auth, async (req, res) => {
   try {
@@ -161,6 +172,17 @@ router.put("/:id", auth, async (req, res) => {
   }
 });
 
+// Delete invitation (auth, owner)
+router.delete("/:id", auth, async (req, res) => {
+  try {
+    const invitation = await Invitation.findOneAndDelete({ _id: req.params.id, owner: req.user.id });
+    if (!invitation) return res.status(404).json({ error: "Invitation not found" });
+    res.json({ success: true, id: invitation._id });
+  } catch {
+    res.status(500).json({ error: "Failed to delete invitation" });
+  }
+});
+
 // List invitations I responded to (auth)
 router.get("/my/responses", auth, async (req, res) => {
   try {
@@ -184,6 +206,77 @@ router.get("/my/responses", auth, async (req, res) => {
     res.json(payload);
   } catch {
     res.status(500).json({ error: "Failed to load responses" });
+  }
+});
+
+// Export invitation responses as PDF (auth, owner)
+router.get("/:id/export", auth, async (req, res) => {
+  try {
+    const invitation = await Invitation.findOne({ _id: req.params.id, owner: req.user.id });
+    if (!invitation) return res.status(404).json({ error: "Invitation not found" });
+    const responses = invitation.responses || [];
+    const counts = responses.reduce(
+      (acc, resp) => {
+        if (resp.status && acc[resp.status] !== undefined) {
+          acc[resp.status] += 1;
+        }
+        return acc;
+      },
+      { attending: 0, maybe: 0, not_attending: 0 }
+    );
+
+    const filename = `${safeFileName(invitation.title)}-responses.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    const doc = new PDFDocument({ margin: 50 });
+    doc.pipe(res);
+
+    doc.fontSize(20).text(invitation.title || "Invitation", { align: "left" });
+    doc.moveDown(0.5);
+    if (invitation.dateTime) {
+      doc.fontSize(12).text(`Event: ${new Date(invitation.dateTime).toLocaleString()}`);
+    }
+    if (invitation.location) {
+      doc.fontSize(12).text(`Location: ${invitation.location}`);
+    }
+    if (invitation.responseCutoff) {
+      doc.fontSize(12).text(`RSVP cutoff: ${new Date(invitation.responseCutoff).toLocaleString()}`);
+    }
+
+    doc.moveDown();
+    doc.fontSize(12).text(
+      `Responses: ${responses.length} (Attending: ${counts.attending} | Maybe: ${counts.maybe} | Not attending: ${counts.not_attending})`
+    );
+    doc.moveDown();
+    doc.fontSize(14).text("Guest responses", { underline: true });
+
+    if (!responses.length) {
+      doc.moveDown().fontSize(12).text("No responses yet.");
+    } else {
+      responses
+        .sort((a, b) => {
+          const timeA = new Date(a.updatedAt || a.createdAt || 0).getTime();
+          const timeB = new Date(b.updatedAt || b.createdAt || 0).getTime();
+          return timeB - timeA;
+        })
+        .forEach((resp, index) => {
+          const displayName = resp.displayName || resp.name || "Anonymous";
+          const status = STATUS_LABELS[resp.status] || resp.status || "Unknown";
+          const updated = resp.updatedAt || resp.createdAt;
+          doc.moveDown(0.7);
+          doc.fontSize(12).text(`${index + 1}. ${displayName}`);
+          doc.fontSize(11).text(`Status: ${status}`);
+          doc.fontSize(11).text(`Updated: ${updated ? new Date(updated).toLocaleString() : "-"}`);
+          if (resp.notes) {
+            doc.fontSize(11).text(`Notes: ${resp.notes}`);
+          }
+        });
+    }
+
+    doc.end();
+  } catch {
+    res.status(500).json({ error: "Failed to export invitation" });
   }
 });
 
